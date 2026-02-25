@@ -241,6 +241,23 @@ Azure Blob Storage
 
 
 
+Data Quality & Governance:
+
+
+
+
+Schema validation during injestion
+Duplicate removal strategy
+Null value Management
+Delta Lake versioning for auditability
+
+
+
+
+
+
+
+
 
 
 Author:
