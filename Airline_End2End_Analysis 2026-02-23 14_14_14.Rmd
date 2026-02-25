@@ -1,0 +1,197 @@
+
+---
+title: "Airline_End2End_Analysis 2026-02-23 14:14:14"
+output:
+  html_document:
+    toc: true
+---
+
+
+```{r}
+library(SparkR)
+
+sas_token <- "sp=r&st=2026-02-23T13:10:16Z&se=2026-02-23T21:25:16Z&spr=https&sv=2024-11-04&sr=c&sig=sW08N1Brspw7Vn0T8ScGYFEjYhSG7K8%2BTcd%2B4v7slJk%3D"
+
+sparkR.session(sparkConfig = list(
+  "fs.azure.sas.sales-data.omamegbedatalake.blob.core.windows.net" = sas_token
+))
+
+df <- read.df(
+  "wasbs://sales-data@omamegbedatalake.blob.core.windows.net/airline_passenger_satisfaction.csv",
+  source = "csv",
+  header = "true",
+  inferSchema = "true"
+)
+
+display(df)
+```
+
+
+```{r}
+# Data overview and inspection
+printSchema(df)
+head(df)
+summary(df)
+```
+
+
+```{r}
+numeric_cols <- c("Age", "Flight Distance", "Departure Delay", "Arrival Delay",
+                  "Departure and Arrival Time Convenience", "Ease of Online Booking",
+                  "Check-in Service", "Online Boarding", "Gate Location", 
+                  "On-board Service", "Seat Comfort", "Leg Room Service",
+                  "Cleanliness", "Food and Drink", "In-flight Service", 
+                  "In-flight Wifi Service", "In-flight Entertainment", "Baggage Handling")
+
+for (col in numeric_cols) {
+  df[[col]] <- cast(df[[col]], "double")
+}
+```
+
+
+```{r}
+df$Satisfaction <- regexp_replace(df$Satisfaction, "Neutral or Dissatisfied", "Dissatisfied")
+```
+
+
+```{r}
+display(count(groupBy(df, df$Satisfaction)))
+```
+
+
+```{r}
+local_df <- collect(df)
+library(ggplot2)
+
+ggplot(local_df, aes(x = Satisfaction, fill = Satisfaction)) +
+  geom_bar() +
+  labs(title = "Passenger Satisfaction Distribution", x = "Satisfaction", y = "Count") +
+  theme_minimal()
+```
+
+
+```{r}
+ggplot(local_df, aes(x = Class, fill = Satisfaction)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Satisfaction by Travel Class") +
+  theme_minimal()
+```
+
+
+```{r}
+library(dplyr)
+
+local_df %>%
+  group_by(`Customer Type`, Satisfaction) %>%
+  summarise(avg_distance = mean(`Flight Distance`, na.rm = TRUE)) %>%
+  ggplot(aes(x = `Customer Type`, y = avg_distance, fill = Satisfaction)) +
+  geom_col(position = "dodge") +
+  labs(title = "Average Flight Distance by Customer Type", y = "Average Distance (miles)") +
+  theme_minimal()
+```
+
+
+```{r}
+ggplot(local_df, aes(x = `Departure Delay`, fill = Satisfaction)) +
+  geom_histogram(bins = 30, alpha = 0.6, position = "identity") +
+  labs(title = "Departure Delay vs. Satisfaction") +
+  theme_minimal()
+```
+
+
+```{r}
+model_cols <- c("Age", "Flight Distance", "Departure Delay", "Arrival Delay",
+                "Seat Comfort", "In-flight Service", "Leg Room Service", 
+                "Food and Drink", "In-flight Entertainment", "Baggage Handling", 
+                "Satisfaction")
+
+model_df <- df[, model_cols]
+model_df <- na.omit(model_df)
+```
+
+
+```{r}
+# Rename columns to remove spaces for formula compatibility
+model_df <- withColumnRenamed(model_df, "Flight Distance", "Flight_Distance")
+model_df <- withColumnRenamed(model_df, "Departure Delay", "Departure_Delay")
+model_df <- withColumnRenamed(model_df, "Arrival Delay", "Arrival_Delay")
+model_df <- withColumnRenamed(model_df, "Seat Comfort", "Seat_Comfort")
+model_df <- withColumnRenamed(model_df, "In-flight Service", "Inflight_Service")
+model_df <- withColumnRenamed(model_df, "Leg Room Service", "Leg_Room_Service")
+model_df <- withColumnRenamed(model_df, "Food and Drink", "Food_and_Drink")
+model_df <- withColumnRenamed(model_df, "In-flight Entertainment", "Inflight_Entertainment")
+model_df <- withColumnRenamed(model_df, "Baggage Handling", "Baggage_Handling")
+
+model <- spark.logit(model_df, Satisfaction ~ Age + Flight_Distance + Departure_Delay + Arrival_Delay + Seat_Comfort + Inflight_Service + Leg_Room_Service + Food_and_Drink + Inflight_Entertainment + Baggage_Handling)
+
+summary(model)
+```
+
+
+```{r}
+model <- spark.logit(
+  model_df,
+  Satisfaction ~ Age + Flight_Distance + Departure_Delay + 
+                 Arrival_Delay + Seat_Comfort + Inflight_Service +
+                 Leg_Room_Service + Food_and_Drink + 
+                 Inflight_Entertainment + Baggage_Handling
+)
+
+summary(model)
+```
+
+
+```{r}
+predictions <- predict(model, model_df)
+preds <- SparkR::collect(predictions)
+
+# Confusion Matrix
+table(preds$Satisfaction, preds$prediction)
+```
+
+
+```{r}
+coef_df <- as.data.frame(summary(model)$coefficients)
+coef_df$Feature <- rownames(coef_df)
+
+ggplot(coef_df[-1, ], aes(x = reorder(Feature, Estimate), y = Estimate)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Feature Importance (Logistic Regression)",
+       x = "Feature", y = "Coefficient") +
+  theme_minimal()
+```
+
+
+```{r}
+# Rename columns to replace spaces with underscores for Delta compatibility
+for (col_name in colnames(df)) {
+  new_name <- gsub(" ", "_", col_name)
+  df <- withColumnRenamed(df, col_name, new_name)
+}
+
+write.df(df,
+         path = "/Workspace/Users/cu.omams@gmail.com/cleaned_airline_satisfaction",
+         source = "delta",
+         mode = "overwrite")
+```
+
+
+```{r}
+# Read the cleaned data from Delta table
+df_clean <- SparkR::read.df(
+  "/Workspace/Users/cu.omams@gmail.com/cleaned_airline_satisfaction",
+  source = "delta"
+)
+
+SparkR::write.df(df_clean,
+         path = "/Workspace/Users/cu.omams@gmail.com/cleaned_airline_satisfaction_csv",
+         source = "csv",
+         mode = "overwrite")
+```
+
+
+```{r}
+# Download link for CSV output:
+# https://<your-workspace>#/files/Workspace/Users/cu.omams@gmail.com/cleaned_airline_satisfaction_csv
+```
